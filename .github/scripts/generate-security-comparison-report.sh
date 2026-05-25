@@ -283,26 +283,13 @@ SONAR_FILES="$(sonar_files)"
 SONAR_HOTSPOT_FILES="$(sonar_hotspot_files)"
 SONAR_ALL_FILES="${SONAR_FILES}"$'\n'"${SONAR_HOTSPOT_FILES}"
 
-detected() {
-  local files="$1"
-  local expected_file="$2"
-  if grep -Fq "${expected_file}" <<< "${files}"; then
+yes_no_from_count() {
+  local count="$1"
+  if (( count > 0 )); then
     echo "Yes"
   else
     echo "No"
   fi
-}
-
-write_case_row() {
-  local title="$1"
-  local file="$2"
-  local semgrep codeql sonar
-
-  semgrep="$(detected "${SEMGREP_FILES}" "${file}")"
-  codeql="$(detected "${CODEQL_FILES}" "${file}")"
-  sonar="$(detected "${SONAR_ALL_FILES}" "${file}")"
-
-  printf '| %s | `%s` | %s | %s | %s |\n' "${title}" "${file}" "${semgrep}" "${codeql}" "${sonar}" >> "${REPORT_FILE}"
 }
 
 write_classified_case_row() {
@@ -311,9 +298,9 @@ write_classified_case_row() {
   local file="$3"
   local semgrep codeql sonar
 
-  semgrep="$(detected "${SEMGREP_FILES}" "${file}")"
-  codeql="$(detected "${CODEQL_FILES}" "${file}")"
-  sonar="$(detected "${SONAR_ALL_FILES}" "${file}")"
+  semgrep="$(yes_no_from_count "$(sarif_result_count_for_file "${SEMGREP_SARIF}" "${file}")")"
+  codeql="$(yes_no_from_count "$(codeql_result_count_for_file "${file}")")"
+  sonar="$(yes_no_from_count "$(sonar_result_count_for_file "${file}")")"
 
   printf '| %s | %s | `%s` | %s | %s | %s |\n' "${title}" "${vulnerability_class}" "${file}" "${semgrep}" "${codeql}" "${sonar}" >> "${REPORT_FILE}"
 }
@@ -328,37 +315,6 @@ write_detail_row() {
   sonar_detail="$(sonar_details_for_file "${file}")"
 
   printf '| %s | `%s` | %s | %s | %s |\n' "${title}" "${file}" "${semgrep_detail}" "${codeql_detail}" "${sonar_detail}" >> "${REPORT_FILE}"
-}
-
-count_detected() {
-  local files="$1"
-  shift
-  local count=0
-  local expected_file
-
-  for expected_file in "$@"; do
-    if grep -Fq "${expected_file}" <<< "${files}"; then
-      count=$((count + 1))
-    fi
-  done
-
-  echo "${count}"
-}
-
-variation_count_for_files() {
-  local count=0
-  local expected_file semgrep codeql sonar
-
-  for expected_file in "$@"; do
-    semgrep="$(detected "${SEMGREP_FILES}" "${expected_file}")"
-    codeql="$(detected "${CODEQL_FILES}" "${expected_file}")"
-    sonar="$(detected "${SONAR_ALL_FILES}" "${expected_file}")"
-    if [[ "${semgrep}" != "${codeql}" || "${semgrep}" != "${sonar}" ]]; then
-      count=$((count + 1))
-    fi
-  done
-
-  echo "${count}"
 }
 
 sum_semgrep_target_findings() {
