@@ -23,4 +23,4 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Semgrep
-        run: semgrep scan --config auto --config .semgrep.yml
+        run: semgrep scan --config p/security-audit --config p/secrets --config p/owasp-top-ten --config p/java
