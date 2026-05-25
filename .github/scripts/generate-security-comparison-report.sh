@@ -5,6 +5,7 @@ REPORT_DIR="security-reports"
 REPORT_FILE="${REPORT_DIR}/security-tool-comparison.md"
 SEMGREP_SARIF="${REPORT_DIR}/semgrep.sarif"
 SONAR_JSON="${REPORT_DIR}/sonar-issues.json"
+SONAR_HOTSPOTS_JSON="${REPORT_DIR}/sonar-hotspots.json"
 
 mkdir -p "${REPORT_DIR}"
 
@@ -32,9 +33,23 @@ sonar_count() {
   fi
 }
 
+sonar_hotspot_count() {
+  if [[ -f "${SONAR_HOTSPOTS_JSON}" ]]; then
+    jq '.hotspots | length' "${SONAR_HOTSPOTS_JSON}"
+  else
+    echo 0
+  fi
+}
+
 sonar_files() {
   if [[ -f "${SONAR_JSON}" ]]; then
     jq -r '.issues[]?.component? // empty | sub("^.*:"; "")' "${SONAR_JSON}"
+  fi
+}
+
+sonar_hotspot_files() {
+  if [[ -f "${SONAR_HOTSPOTS_JSON}" ]]; then
+    jq -r '.hotspots[]?.component? // empty | sub("^.*:"; "")' "${SONAR_HOTSPOTS_JSON}"
   fi
 }
 
@@ -49,7 +64,10 @@ done < <(find "${REPORT_DIR}/codeql-results" -type f -name '*.sarif' 2>/dev/null
 SEMGREP_COUNT="$(sarif_count "${SEMGREP_SARIF}")"
 SEMGREP_FILES="$(sarif_files "${SEMGREP_SARIF}")"
 SONAR_COUNT="$(sonar_count)"
+SONAR_HOTSPOT_COUNT="$(sonar_hotspot_count)"
 SONAR_FILES="$(sonar_files)"
+SONAR_HOTSPOT_FILES="$(sonar_hotspot_files)"
+SONAR_ALL_FILES="${SONAR_FILES}"$'\n'"${SONAR_HOTSPOT_FILES}"
 
 detected() {
   local files="$1"
@@ -68,7 +86,7 @@ write_case_row() {
 
   semgrep="$(detected "${SEMGREP_FILES}" "${file}")"
   codeql="$(detected "${CODEQL_FILES}" "${file}")"
-  sonar="$(detected "${SONAR_FILES}" "${file}")"
+  sonar="$(detected "${SONAR_ALL_FILES}" "${file}")"
 
   printf '| %s | `%s` | %s | %s | %s |\n' "${title}" "${file}" "${semgrep}" "${codeql}" "${sonar}" >> "${REPORT_FILE}"
 }
@@ -86,14 +104,17 @@ write_case_row() {
   echo "| --- | ---: | --- |"
   echo "| Semgrep | ${SEMGREP_COUNT} | \`semgrep.sarif\` |"
   echo "| CodeQL | ${CODEQL_COUNT} | \`codeql-results/*.sarif\` |"
-  echo "| SonarCloud | ${SONAR_COUNT} | \`sonar-issues.json\` |"
+  echo "| SonarCloud issues | ${SONAR_COUNT} | \`sonar-issues.json\` |"
+  echo "| SonarCloud security hotspots | ${SONAR_HOTSPOT_COUNT} | \`sonar-hotspots.json\` |"
   echo
   echo "## Methodology"
   echo
   echo "- Semgrep is run with public/default-style rulesets only: \`p/security-audit\`, \`p/secrets\`, \`p/owasp-top-ten\`, and \`p/java\`."
   echo "- No project-specific Semgrep rules are used for this comparison."
   echo "- CodeQL is run with GitHub's Java/Kotlin analysis plus \`security-extended\` and \`security-and-quality\` query suites."
-  echo "- SonarCloud results come from the configured SonarCloud project quality profile and exported security issues/hotspots."
+  echo "- SonarCloud results come from the configured SonarCloud project quality profile."
+  echo "- SonarCloud issues are exported from \`api/issues/search\` with the current branch or pull request context."
+  echo "- SonarCloud security hotspots are exported separately from \`api/hotspots/search\` with the same branch or pull request context."
   echo
   echo "## Expected Educational Vulnerabilities"
   echo
