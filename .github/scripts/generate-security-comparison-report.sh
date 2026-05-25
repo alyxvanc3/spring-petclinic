@@ -72,6 +72,16 @@ sarif_details_for_file() {
 
   local details
   details="$(jq -r --arg expected_file "${expected_file}" '
+    def normalize_path:
+      tostring
+      | sub("^file://"; "")
+      | sub("^/src/"; "")
+      | sub("^/github/workspace/"; "")
+      | sub("^\\./"; "");
+
+    def matches_expected($expected):
+      (normalize_path == $expected) or (normalize_path | endswith($expected));
+
     def rule_lookup($run; $id):
       ($run.tool.driver.rules // [])
       | map(select(.id == $id))
@@ -83,7 +93,7 @@ sarif_details_for_file() {
       | $run.results[]?
       | select([
           .locations[]?.physicalLocation?.artifactLocation?.uri?
-        ] | any(. == $expected_file))
+        ] | any(matches_expected($expected_file)))
       | {
           rule: (.ruleId // "unknown-rule"),
           level: (.level // "unknown"),
@@ -99,6 +109,35 @@ sarif_details_for_file() {
   else
     echo "No findings"
   fi
+}
+
+sarif_result_count_for_file() {
+  local file="$1"
+  local expected_file="$2"
+
+  if [[ ! -f "${file}" ]]; then
+    echo 0
+    return
+  fi
+
+  jq -r --arg expected_file "${expected_file}" '
+    def normalize_path:
+      tostring
+      | sub("^file://"; "")
+      | sub("^/src/"; "")
+      | sub("^/github/workspace/"; "")
+      | sub("^\\./"; "");
+
+    def matches_expected($expected):
+      (normalize_path == $expected) or (normalize_path | endswith($expected));
+
+    [
+      .runs[]?.results[]?
+      | select([
+          .locations[]?.physicalLocation?.artifactLocation?.uri?
+        ] | any(matches_expected($expected_file)))
+    ] | length
+  ' "${file}"
 }
 
 codeql_details_for_file() {
@@ -121,6 +160,17 @@ codeql_details_for_file() {
   fi
 }
 
+codeql_result_count_for_file() {
+  local expected_file="$1"
+  local count=0
+
+  while IFS= read -r sarif; do
+    count=$((count + $(sarif_result_count_for_file "${sarif}" "${expected_file}")))
+  done < <(find "${REPORT_DIR}/codeql-results" -type f -name '*.sarif' 2>/dev/null | sort)
+
+  echo "${count}"
+}
+
 sonar_issue_details_for_file() {
   local expected_file="$1"
 
@@ -138,6 +188,22 @@ sonar_issue_details_for_file() {
   ' "${SONAR_JSON}"
 }
 
+sonar_issue_count_for_file() {
+  local expected_file="$1"
+
+  if [[ ! -f "${SONAR_JSON}" ]]; then
+    echo 0
+    return
+  fi
+
+  jq -r --arg expected_file "${expected_file}" '
+    [
+      .issues[]?
+      | select((.component? // "" | sub("^.*:"; "")) == $expected_file)
+    ] | length
+  ' "${SONAR_JSON}"
+}
+
 sonar_hotspot_details_for_file() {
   local expected_file="$1"
 
@@ -152,6 +218,22 @@ sonar_hotspot_details_for_file() {
       | select((.component? // "" | sub("^.*:"; "")) == $expected_file)
       | "\(.ruleKey // "unknown-rule") [HOTSPOT/\(.status // "unknown")] line \(.line // "?"): \(.message // "")"
     ][0:3] | join("<br>")
+  ' "${SONAR_HOTSPOTS_JSON}"
+}
+
+sonar_hotspot_count_for_file() {
+  local expected_file="$1"
+
+  if [[ ! -f "${SONAR_HOTSPOTS_JSON}" ]]; then
+    echo 0
+    return
+  fi
+
+  jq -r --arg expected_file "${expected_file}" '
+    [
+      .hotspots[]?
+      | select((.component? // "" | sub("^.*:"; "")) == $expected_file)
+    ] | length
   ' "${SONAR_HOTSPOTS_JSON}"
 }
 
@@ -175,6 +257,14 @@ sonar_details_for_file() {
   else
     echo "No findings"
   fi
+}
+
+sonar_result_count_for_file() {
+  local expected_file="$1"
+  echo $(( \
+    $(sonar_issue_count_for_file "${expected_file}") + \
+    $(sonar_hotspot_count_for_file "${expected_file}") \
+  ))
 }
 
 CODEQL_COUNT=0
@@ -271,6 +361,39 @@ variation_count_for_files() {
   echo "${count}"
 }
 
+sum_semgrep_target_findings() {
+  local count=0
+  local expected_file
+
+  for expected_file in "$@"; do
+    count=$((count + $(sarif_result_count_for_file "${SEMGREP_SARIF}" "${expected_file}")))
+  done
+
+  echo "${count}"
+}
+
+sum_codeql_target_findings() {
+  local count=0
+  local expected_file
+
+  for expected_file in "$@"; do
+    count=$((count + $(codeql_result_count_for_file "${expected_file}")))
+  done
+
+  echo "${count}"
+}
+
+sum_sonar_target_findings() {
+  local count=0
+  local expected_file
+
+  for expected_file in "$@"; do
+    count=$((count + $(sonar_result_count_for_file "${expected_file}")))
+  done
+
+  echo "${count}"
+}
+
 STRUCTURAL_FILES=(
   "src/main/resources/templates/owners/ownerDetails.html"
   "src/main/resources/application.properties"
@@ -285,49 +408,24 @@ CONTEXTUAL_FILES=(
 
 ALL_EXPECTED_FILES=("${STRUCTURAL_FILES[@]}" "${CONTEXTUAL_FILES[@]}")
 
-STRUCTURAL_DETECTIONS=$(( \
-  $(count_detected "${SEMGREP_FILES}" "${STRUCTURAL_FILES[@]}") + \
-  $(count_detected "${CODEQL_FILES}" "${STRUCTURAL_FILES[@]}") + \
-  $(count_detected "${SONAR_ALL_FILES}" "${STRUCTURAL_FILES[@]}") \
-))
-CONTEXTUAL_DETECTIONS=$(( \
-  $(count_detected "${SEMGREP_FILES}" "${CONTEXTUAL_FILES[@]}") + \
-  $(count_detected "${CODEQL_FILES}" "${CONTEXTUAL_FILES[@]}") + \
-  $(count_detected "${SONAR_ALL_FILES}" "${CONTEXTUAL_FILES[@]}") \
-))
-STRUCTURAL_OPPORTUNITIES=$((${#STRUCTURAL_FILES[@]} * 3))
-CONTEXTUAL_OPPORTUNITIES=$((${#CONTEXTUAL_FILES[@]} * 3))
-VARIATION_CASES="$(variation_count_for_files "${ALL_EXPECTED_FILES[@]}")"
-
-if (( STRUCTURAL_DETECTIONS > CONTEXTUAL_DETECTIONS )); then
-  H1_RESULT="Supported in the current artifacts: structural cases have more tool-file detections than contextual cases."
-elif (( STRUCTURAL_DETECTIONS == 0 && CONTEXTUAL_DETECTIONS == 0 )); then
-  H1_RESULT="Not supported by the current artifacts: no structural or contextual target cases were detected, so no performance advantage can be established."
-else
-  H1_RESULT="Not supported by the current artifacts: structural cases do not show a detection advantage over contextual cases."
-fi
-
-if (( VARIATION_CASES > 0 )); then
-  H4_RESULT="Supported in the current artifacts: at least one vulnerable file has differing detection outcomes across tools."
-else
-  H4_RESULT="Not supported by the current artifacts: all tools produced the same file-level outcome for every target case."
-fi
+SONAR_TOTAL_COUNT=$((SONAR_COUNT + SONAR_HOTSPOT_COUNT))
+SEMGREP_TARGET_FINDING_COUNT="$(sum_semgrep_target_findings "${ALL_EXPECTED_FILES[@]}")"
+CODEQL_TARGET_FINDING_COUNT="$(sum_codeql_target_findings "${ALL_EXPECTED_FILES[@]}")"
+SONAR_TARGET_FINDING_COUNT="$(sum_sonar_target_findings "${ALL_EXPECTED_FILES[@]}")"
+SEMGREP_NON_TARGET_FINDING_COUNT=$((SEMGREP_COUNT - SEMGREP_TARGET_FINDING_COUNT))
+CODEQL_NON_TARGET_FINDING_COUNT=$((CODEQL_COUNT - CODEQL_TARGET_FINDING_COUNT))
+SONAR_NON_TARGET_FINDING_COUNT=$((SONAR_TOTAL_COUNT - SONAR_TARGET_FINDING_COUNT))
 
 {
-  echo "# Academic Comparative Analysis of SAST Tool Results"
+  echo "# Security Tool Comparison Report"
   echo
-  echo "Commit: \`${GITHUB_SHA:-local}\`"
-  echo "Branch/ref: \`${GITHUB_REF_NAME:-local}\`"
-  echo "Generated at: \`$(date -u '+%Y-%m-%dT%H:%M:%SZ')\`"
+  echo "## Run Metadata"
   echo
-  echo "## Abstract"
-  echo
-  echo "This report compares Semgrep, CodeQL, and SonarCloud on the same intentionally vulnerable Spring Petclinic codebase. The comparison is organized around two research hypotheses and uses exported SARIF/JSON artifacts as the unit of evidence. Detection is measured at file level, meaning a tool is counted as detecting a scenario when it reports at least one finding in the file that contains the seeded vulnerability."
-  echo
-  echo "## Research Hypotheses"
-  echo
-  echo "- **H1:** Traditional SAST tools perform better in detecting structural vulnerabilities than contextual vulnerabilities."
-  echo "- **H4:** Different SAST tools produce varying results on the same vulnerable codebase."
+  echo "| Field | Value |"
+  echo "| --- | --- |"
+  echo "| Commit | \`${GITHUB_SHA:-local}\` |"
+  echo "| Branch/ref | \`${GITHUB_REF_NAME:-local}\` |"
+  echo "| Generated at | \`$(date -u '+%Y-%m-%dT%H:%M:%SZ')\` |"
   echo
   echo "## Experimental Design"
   echo
@@ -337,16 +435,16 @@ fi
   echo "| Compared tools | Semgrep, CodeQL, SonarCloud |"
   echo "| Evidence artifacts | \`semgrep.sarif\`, \`codeql-results/*.sarif\`, \`sonar-issues.json\`, \`sonar-hotspots.json\` |"
   echo "| Detection unit | File-level match against the file that contains the seeded vulnerability |"
-  echo "| Interpretation constraint | A file-level match does not prove that the exact weakness was classified correctly |"
+  echo "| Count interpretation | Total exported findings cover the whole analyzed codebase; target-file findings cover only the seeded vulnerability files |"
+  echo "| Match interpretation | A file-level match does not prove that the exact weakness was classified correctly |"
   echo
   echo "## Tool Configuration"
   echo
-  echo "- Semgrep is run with public/default-style rulesets only: \`p/security-audit\`, \`p/secrets\`, \`p/owasp-top-ten\`, and \`p/java\`."
-  echo "- No project-specific Semgrep rules are used for this comparison."
-  echo "- CodeQL is run with GitHub's Java/Kotlin analysis plus \`security-extended\` and \`security-and-quality\` query suites."
-  echo "- SonarCloud results come from the configured SonarCloud project quality profile."
-  echo "- SonarCloud issues are exported from \`api/issues/search\` with the current branch or pull request context."
-  echo "- SonarCloud security hotspots are exported separately from \`api/hotspots/search\` with the same branch or pull request context."
+  echo "| Tool | Configuration |"
+  echo "| --- | --- |"
+  echo "| Semgrep | Public/default-style rulesets: \`p/security-audit\`, \`p/secrets\`, \`p/owasp-top-ten\`, \`p/java\`; no project-specific rules |"
+  echo "| CodeQL | GitHub Java/Kotlin analysis with \`security-extended\` and \`security-and-quality\` query suites |"
+  echo "| SonarCloud | Configured SonarCloud project quality profile; issues from \`api/issues/search\`; hotspots from \`api/hotspots/search\` |"
   echo
   echo "## Vulnerability Classification"
   echo
@@ -355,17 +453,15 @@ fi
   echo "| Structural | Vulnerabilities that can usually be identified through syntactic patterns, data-flow, source-to-sink relationships, or configuration inspection | Stored XSS, hardcoded secrets, path traversal, JPQL injection |"
   echo "| Contextual | Vulnerabilities that depend on application policy, business rules, intended authorization boundaries, or semantic interpretation of sensitive behavior | Missing admin authorization, sensitive data and user input in logs |"
   echo
-  echo "## Aggregate Finding Counts"
+  echo "## Finding Counts"
   echo
-  echo "| Tool | Exported finding count | Source artifact |"
-  echo "| --- | ---: | --- |"
-  echo "| Semgrep | ${SEMGREP_COUNT} | \`semgrep.sarif\` |"
-  echo "| CodeQL | ${CODEQL_COUNT} | \`codeql-results/*.sarif\` |"
-  echo "| SonarCloud | ${SONAR_COUNT} issues / ${SONAR_HOTSPOT_COUNT} hotspots | \`sonar-issues.json\`, \`sonar-hotspots.json\` |"
+  echo "| Tool | Total exported findings | Findings in target files | Findings outside target files | Source artifact |"
+  echo "| --- | ---: | ---: | ---: | --- |"
+  echo "| Semgrep | ${SEMGREP_COUNT} | ${SEMGREP_TARGET_FINDING_COUNT} | ${SEMGREP_NON_TARGET_FINDING_COUNT} | \`semgrep.sarif\` |"
+  echo "| CodeQL | ${CODEQL_COUNT} | ${CODEQL_TARGET_FINDING_COUNT} | ${CODEQL_NON_TARGET_FINDING_COUNT} | \`codeql-results/*.sarif\` |"
+  echo "| SonarCloud | ${SONAR_TOTAL_COUNT} (${SONAR_COUNT} issues / ${SONAR_HOTSPOT_COUNT} hotspots) | ${SONAR_TARGET_FINDING_COUNT} | ${SONAR_NON_TARGET_FINDING_COUNT} | \`sonar-issues.json\`, \`sonar-hotspots.json\` |"
   echo
   echo "## Vulnerability-Level Detection Matrix"
-  echo
-  echo "A Yes value means the tool exported at least one finding that references the file containing the intentionally vulnerable example. It does not guarantee the exact weakness classification is correct."
   echo
   echo "| Vulnerability scenario | Class | File | Semgrep | CodeQL | SonarCloud |"
   echo "| --- | --- | --- | --- | --- | --- |"
@@ -382,8 +478,6 @@ write_classified_case_row "Sensitive data and user input in logs" "Contextual" "
   echo
   echo "## Finding Evidence by Target File"
   echo
-  echo "This table shows up to three findings per tool for each target file. A finding in the same file does not necessarily mean the expected weakness was classified correctly."
-  echo
   echo "| Vulnerability scenario | File | Semgrep details | CodeQL details | SonarCloud details |"
   echo "| --- | --- | --- | --- | --- |"
 } >> "${REPORT_FILE}"
@@ -394,28 +488,3 @@ write_detail_row "Path traversal file download" "src/main/java/org/springframewo
 write_detail_row "JPQL injection through string concatenation" "src/main/java/org/springframework/samples/petclinic/owner/VulnerableOwnerSearchController.java"
 write_detail_row "Missing admin authorization / business logic weakness" "src/main/java/org/springframework/samples/petclinic/system/VulnerableAdminReportController.java"
 write_detail_row "Sensitive data and user input in logs" "src/main/java/org/springframework/samples/petclinic/system/VulnerableLoggingController.java"
-
-{
-  echo
-  echo "## Hypothesis Evaluation"
-  echo
-  echo "| Hypothesis | Evidence summary | Interpretation |"
-  echo "| --- | --- | --- |"
-  echo "| H1 | Structural detections: ${STRUCTURAL_DETECTIONS}/${STRUCTURAL_OPPORTUNITIES} tool-file opportunities; contextual detections: ${CONTEXTUAL_DETECTIONS}/${CONTEXTUAL_OPPORTUNITIES} tool-file opportunities | ${H1_RESULT} |"
-  echo "| H4 | ${VARIATION_CASES}/${#ALL_EXPECTED_FILES[@]} target files show different Yes/No outcomes across Semgrep, CodeQL, and SonarCloud | ${H4_RESULT} |"
-  echo
-  echo "## Discussion"
-  echo
-  echo "The current comparison does not use custom rules or manual triage labels. Therefore, the results should be interpreted as tool output under the configured default rule sets, not as a complete measurement of exploitability or vulnerability presence. Contextual weaknesses, especially authorization and business-logic issues, remain difficult for general-purpose SAST because the expected access policy is rarely explicit in the source code."
-  echo
-  echo "## Validity Threats"
-  echo
-  echo "- **Construct validity:** File-level detection may overestimate true detection when the reported rule is unrelated to the seeded weakness."
-  echo "- **Internal validity:** Missing or empty SARIF/JSON artifacts produce zero counts even if a tool would detect the issue under a complete run."
-  echo "- **External validity:** Results from one Spring Petclinic variant may not generalize to other frameworks, rule configurations, or vulnerability corpora."
-  echo "- **Configuration validity:** SonarCloud results depend on the configured project key and \`SONAR_TOKEN\`; if the token is unavailable, the SonarCloud count will be zero."
-  echo
-  echo "## Conclusion"
-  echo
-  echo "Based on the exported artifacts for this run, the report provides a structured comparison framework for H1 and H4 but does not establish support for a structural-over-contextual advantage or inter-tool variation unless such differences appear in the generated detection matrix. Raw SARIF and JSON artifacts should be reviewed for rule identifiers, severities, and exact locations before drawing final academic conclusions."
-} >> "${REPORT_FILE}"
