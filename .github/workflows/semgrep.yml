@@ -2,10 +2,7 @@ name: Semgrep
 
 on:
   pull_request: {}
-  push: {}
   workflow_dispatch: {}
-  schedule:
-    - cron: '37 2 * * 1'
 
 permissions:
   contents: read

@@ -2,10 +2,7 @@ name: CodeQL
 
 on:
   pull_request: {}
-  push: {}
   workflow_dispatch: {}
-  schedule:
-    - cron: '19 3 * * 2'
 
 permissions:
   actions: read

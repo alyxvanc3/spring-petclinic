@@ -2,10 +2,7 @@ name: SonarCloud
 
 on:
   pull_request: {}
-  push: {}
   workflow_dispatch: {}
-  schedule:
-    - cron: '11 4 * * 3'
 
 permissions:
   contents: read
