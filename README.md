@@ -48,6 +48,16 @@ There is no `Dockerfile` in this project. You can build a container image (if yo
 ./mvnw spring-boot:build-image
 ```
 
+## Security scanning with Semgrep
+
+This project includes a Semgrep configuration in `.semgrep.yml` and a GitHub Actions workflow in `.github/workflows/semgrep.yml`.
+
+Run the same scan locally with:
+
+```bash
+semgrep scan --config auto --config .semgrep.yml
+```
+
 ## In case you find a bug/suggested improvement for Spring Petclinic
 
 Our issue tracker is available [here](https://github.com/spring-projects/spring-petclinic/issues).

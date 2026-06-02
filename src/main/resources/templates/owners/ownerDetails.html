@@ -66,7 +66,9 @@
           </thead>
           <tr th:each="visit : ${pet.visits}">
             <td th:text="${#temporals.format(visit.date, 'yyyy-MM-dd')}"></td>
-            <td th:text="${visit?.description}"></td>
+            <!-- WARNING: Intentionally vulnerable stored XSS sink for security analysis experiments.
+                 User-controlled visit descriptions are rendered as raw HTML without sanitization. -->
+            <td th:utext="${visit?.description}"></td>
           </tr>
           <tr>
             <td><a th:href="@{__${owner.id}__/pets/__${pet.id}__/edit}" th:text="#{editPet}">Edit Pet</a></td>

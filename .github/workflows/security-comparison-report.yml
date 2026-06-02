@@ -1,0 +1,143 @@
+name: Security Tool Comparison Report
+
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  compare-security-tools:
+    name: Compare Semgrep, CodeQL, and SonarCloud
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Create report directory
+        run: mkdir -p security-reports/codeql-results
+
+      - name: Run Semgrep and export SARIF
+        run: >
+          docker run --rm
+          -v "${PWD}:/src"
+          semgrep/semgrep
+          semgrep scan
+          --config p/security-audit
+          --config p/secrets
+          --config p/owasp-top-ten
+          --config p/java
+          /src
+          --sarif --output /src/security-reports/semgrep.sarif
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          queries: +security-extended,security-and-quality
+
+      - name: Build for CodeQL
+        run: ./mvnw -B -DskipTests package
+
+      - name: Run CodeQL and export SARIF
+        uses: github/codeql-action/analyze@v4
+        with:
+          output: security-reports/codeql-results
+
+      - name: Run SonarCloud analysis
+        if: env.SONAR_TOKEN != ''
+        continue-on-error: true
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          sonar_args=()
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            sonar_args+=("-Dsonar.pullrequest.key=${PR_NUMBER}")
+            sonar_args+=("-Dsonar.pullrequest.branch=${PR_HEAD_REF}")
+            sonar_args+=("-Dsonar.pullrequest.base=${PR_BASE_REF}")
+          else
+            sonar_args+=("-Dsonar.branch.name=${GITHUB_REF_NAME}")
+          fi
+
+          ./mvnw -B -DskipTests verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.organization=alyxvanc3 \
+            -Dsonar.projectKey=alyxvanc3_spring-petclinic \
+            "${sonar_args[@]}"
+
+      - name: Export SonarCloud issues
+        if: env.SONAR_TOKEN != ''
+        continue-on-error: true
+        env:
+          SONAR_PROJECT_KEY: alyxvanc3_spring-petclinic
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          branch_args=()
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            branch_args+=(--data-urlencode "pullRequest=${PR_NUMBER}")
+          else
+            branch_args+=(--data-urlencode "branch=${GITHUB_REF_NAME}")
+          fi
+
+          curl -sS -u "${SONAR_TOKEN}:" --get \
+            --data-urlencode "componentKeys=${SONAR_PROJECT_KEY}" \
+            --data-urlencode "ps=500" \
+            "${branch_args[@]}" \
+            "https://sonarcloud.io/api/issues/search" \
+            -o security-reports/sonar-issues.json
+
+      - name: Export SonarCloud security hotspots
+        if: env.SONAR_TOKEN != ''
+        continue-on-error: true
+        env:
+          SONAR_PROJECT_KEY: alyxvanc3_spring-petclinic
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          branch_args=()
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            branch_args+=(--data-urlencode "pullRequest=${PR_NUMBER}")
+          else
+            branch_args+=(--data-urlencode "branch=${GITHUB_REF_NAME}")
+          fi
+
+          curl -sS -u "${SONAR_TOKEN}:" --get \
+            --data-urlencode "projectKey=${SONAR_PROJECT_KEY}" \
+            --data-urlencode "ps=500" \
+            "${branch_args[@]}" \
+            "https://sonarcloud.io/api/hotspots/search" \
+            -o security-reports/sonar-hotspots.json
+
+      - name: Generate comparison report
+        run: bash .github/scripts/generate-security-comparison-report.sh
+
+      - name: Publish report to job summary
+        run: cat security-reports/security-tool-comparison.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload security comparison artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-tool-comparison-${{ github.sha }}
+          path: security-reports/
